@@ -1,0 +1,38 @@
+layer {
+  name: "data1"
+  type: "DummyData"
+  top: "data1"
+  dummy_data_param {
+    data_filler {
+      type: "constant"
+    }
+    num: 10
+    channels: 1
+    height: 28
+    width: 28
+  }
+}
+layer {
+  name: "data2"
+  type: "DummyData"
+  top: "data2"
+  dummy_data_param {
+    data_filler {
+      type: "constant"
+    }
+    num: 10
+    channels: 1
+    height: 28
+    width: 28
+  }
+}
+layer {
+  name: "eltwise1"
+  type: "Eltwise"
+  bottom: "data1"
+  bottom: "data2"
+  top: "eltwise1"
+  eltwise_param {
+    operation: SUM
+  }
+}

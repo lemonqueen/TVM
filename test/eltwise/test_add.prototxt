@@ -1,0 +1,22 @@
+layer {
+  name: "data1"
+  type: "Input"
+  top: "data1"
+  input_param { shape: { dim: 10 dim: 1 dim: 28 dim: 28 } }
+}
+layer {
+  name: "data2"
+  type: "Input"
+  top: "data2"
+  input_param { shape: { dim: 10 dim: 1 dim: 28 dim: 28 } }
+}
+layer {
+  name: "eltwise"
+  type: "Eltwise"
+  bottom: "data1"
+  bottom: "data2"
+  top: "dataout"
+  eltwise_param {
+    operation: SUM
+  }
+}

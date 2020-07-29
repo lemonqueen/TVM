@@ -64,17 +64,14 @@ class Eltwise(CaffeOpConverter):
         #判断算子类型
         if layer.eltwise_param.operation == 0:
             #按元素相乘
-            cls.name = 'multiply'
-            
+            cls.name = 'multiply'            
         elif layer.eltwise_param.operation == 1:
             if len(layer.eltwise_param.coeff) == 2:
                 # 按元素相减
-                print("剪发")
                 cls.name = 'subtract'
             else :
                 # 按元素相加
                 cls.name = 'add'                      
-
         elif layer.eltwise_param.operation == 2:
             #按元素求最大值
             cls.name = 'maximum'
@@ -105,6 +102,7 @@ class Convolution(CaffeOpConverter):
         if layer.convolution_param.kernel_size == []:
             kernel_size = [layer.convolution_param.kernel_h, layer.convolution_param.kernel_w]
         ##分组group
+        # import ipdb; ipdb.set_trace()
         group = layer.convolution_param.group
 
         # 将权重加入到input
@@ -133,7 +131,6 @@ class Convolution(CaffeOpConverter):
 
         if layer.convolution_param.bias_term:
             out = _op.nn.bias_add(out, relay.Constant(tvm.nd.array(params[layer.name][1])))
-        print("out",out)
         return out
 
 class Pooling(CaffeOpConverter):
@@ -186,6 +183,38 @@ class Pooling(CaffeOpConverter):
             custom_check=dimension_constraint())(inputs, args, params)
         return out
 
+class InnerProduct(CaffeOpConverter):
+    """ Operator converter for InnerProduct.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # 将权重加入到input
+        inputs.append(relay.Constant(tvm.nd.array(params[layer.name][0])))
+
+        inputs[0] = _op.nn.batch_flatten(inputs[0])
+        units = infer_channels(inputs[1])
+        out = _op.nn.dense(inputs[0], inputs[1], units=units)
+        if layer.inner_product_param.bias_term:
+            out = _op.nn.bias_add(out, relay.Constant(tvm.nd.array(params[layer.name][1])))
+        return out
+
+class ReLU(CaffeOpConverter):
+    """ Operator converter for ReLU.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # 将权重加入到input
+        # import ipdb; ipdb.set_trace()
+        # relu
+        if layer.relu_param.negative_slope == 0:
+            return _op.nn.relu(inputs[0])
+        # LeakyRelu 
+        else:
+            return _op.nn.leaky_relu(inputs[0], alpha=float(layer.relu_param.negative_slope))
+
+
 
 # compatible operators that do NOT require any conversion.
 _identity_list = []
@@ -197,6 +226,8 @@ def _get_convert_map():
         'Eltwise': Eltwise.get_converter(),
         'Convolution': Convolution.get_converter(),
         'Pooling': Pooling.get_converter(),
+        'InnerProduct':InnerProduct.get_converter(),
+        'ReLU': ReLU.get_converter(),
     }
 
 
@@ -317,7 +348,7 @@ class CaffeNetDef(object):
         '''
 
         inputs = []
-        print("4.处理op")
+        print("4.处理op",layer.type)
         for input in layer.bottom:
             inputs.append(self._nodes[input])
         tvm_op = self._convert_operator(layer, inputs)
@@ -393,11 +424,17 @@ class CaffeNetDef(object):
         print("5.处理输出")
         if outputs is None:
             # 寻找默认输出
-            for i in range(len(self._LayerList)):
-                if self.judgeoutput(self._LayerList[i],self._LayerList):
-                    layer = self._LayerList[i]
-                    for top in layer.top:
-                        out.append(self._nodes[top])
+            # import ipdb; ipdb.set_trace()
+            # for i in range(len(self._LayerList)):
+            #     if self.judgeoutput(self._LayerList[i],self._LayerList):
+            #         layer = self._LayerList[i]
+            #         for top in layer.top:
+            #             out.append(self._nodes[top])
+            layer = self._LayerList[-1]
+            for top in layer.top:
+                out.append(self._nodes[top])
+
+            
         else:
             # outputs若存在,必须是layer.name里的内容
             for out_name in outputs:
@@ -448,6 +485,7 @@ class CaffeNetDef(object):
             # func = get_relay_op(layer.type)(*inputs, **args)
         elif layer.type in convert_map:
             # Add a sanitizing step to convert all byte strings in args to strings
+            # import ipdb; ipdb.set_trace()
             func = convert_map[layer.type](inputs, layer, self._params)
         else:
             raise tvm.error.OpNotImplemented(

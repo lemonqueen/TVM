@@ -39,7 +39,8 @@ def get_tvm_output(net_path,
                    model_path,
                    input_data,
                    target,
-                   ctx):
+                   ctx,
+                   outputs=None):
     """ Generic function to execute and get tvm output"""
     # supporting multiple inputs in caffe in a bit tricky,
     # because the input names can appear at the beginning or end of model.predict_net.external_input
@@ -51,8 +52,9 @@ def get_tvm_output(net_path,
 
     shape_dict = {'data': input_data.shape}
     dtype_dict = {'data': input_data.dtype}
+    # outputs = ['ip1','dataout']
     mod, params = relay.frontend.from_caffe(
-        net_path, model_path, shape_dict, dtype_dict)
+        net_path, model_path, shape_dict, dtype_dict,outputs)
     print("6.在relay上编译模型")
     with relay.build_config(opt_level=3):
         graph, lib, params = relay.build(mod, target, params=params)
@@ -92,6 +94,7 @@ def get_tvm_output(net_path,
         tvm_output = m.get_output(0, tvm.nd.empty((output_shape),output_dtype))
         return tvm_output.asnumpy()
 
+
 def get_caffe_output(net_path, model_path, x, dtype='float32'):
     '''
     直接通过caffe测试
@@ -107,7 +110,8 @@ def get_caffe_output(net_path, model_path, x, dtype='float32'):
     return net.blobs['dataout'].data
     # return net.blobs['conv'].data
 
-def get_tvm_output_eltwise(net_path, 
+
+def get_tvm_output_twoinput(net_path, 
                    model_path,
                    input_data,
                    input_data2,
@@ -142,7 +146,8 @@ def get_tvm_output_eltwise(net_path,
                                                   output_dtype))
     return tvm_output.asnumpy()
 
-def get_caffe_output_eltwise(net_path, model_path, x, y, dtype='float32'):
+
+def get_caffe_output_twoinput(net_path, model_path, x, y, dtype='float32'):
     '''
     直接通过caffe测试
     '''
@@ -155,6 +160,7 @@ def get_caffe_output_eltwise(net_path, model_path, x, y, dtype='float32'):
     net.forward()
     return net.blobs['dataout'].data
 
+
 def verify_caffe_forward_impl(net_path, model_path, data_shape):
     dtype = 'float32'
     data = np.random.uniform(size=data_shape).astype(dtype)  # 生成测试数据
@@ -166,16 +172,18 @@ def verify_caffe_forward_impl(net_path, model_path, data_shape):
         # print("tvm_out\n",tvm_out,type(tvm_out) )
         # print("c_out\n",c_out.shape)
         # print("tvm_out\n",np.array(tvm_out).shape)
+        # import ipdb; ipdb.set_trace()
         tvm.testing.assert_allclose(c_out, tvm_out, rtol=1e-5, atol=1e-5)
     print("完成！！！！")
 
-def verify_caffe_forward_impl_eltwise(net_path, model_path, data_shape):
+
+def verify_caffe_forward_impl_twoinput(net_path, model_path, data_shape):
     dtype = 'float32'
     data1 = np.random.uniform(size=data_shape).astype(dtype)  # 生成测试数据
     data2 = np.random.uniform(size=data_shape).astype(dtype)
-    c_out = get_caffe_output_eltwise(net_path, model_path, data1, data2, dtype)
+    c_out = get_caffe_output_twoinput(net_path, model_path, data1, data2, dtype)
     for target, ctx in ctx_list():
-        tvm_out = get_tvm_output_eltwise(net_path, model_path, data1, data2, target, ctx)
+        tvm_out = get_tvm_output_twoinput(net_path, model_path, data1, data2, target, ctx)
         tvm.testing.assert_allclose(c_out, tvm_out, rtol=1e-5, atol=1e-5)
     print("完成！！！！")
 
@@ -199,7 +207,8 @@ def test_eltwise(_operation):
     
     op_type = "eltwise"
     net_path, model_path = saveModel(op_type,str(net()))    
-    verify_caffe_forward_impl_eltwise(net_path, model_path, data_shape)
+    verify_caffe_forward_impl_twoinput(net_path, model_path, data_shape)
+
 
 def test_eltwise_sub():
     data_shape = [10, 1, 28, 28]
@@ -214,7 +223,8 @@ def test_eltwise_sub():
 
     op_type = "eltwise_sub"
     net_path, model_path = saveModel(op_type,str(net()))    
-    verify_caffe_forward_impl_eltwise(net_path, model_path, data_shape)
+    verify_caffe_forward_impl_twoinput(net_path, model_path, data_shape)
+
 
 conv_params = {
     (7,2,64,3,1),
@@ -237,6 +247,32 @@ def test_conv(_kernel_size,_stride,_num_output,_pad,_group):
     net_path, model_path = saveModel(op_type,str(net()))    
     verify_caffe_forward_impl(net_path, model_path, data_shape)
 
+
+Deconvolution_params = {
+    (2,2,10,3,1),
+    (3,3,5,4,1),
+    (3,1,6,2,1),
+    (4,2,60,0,1)
+}# 只支持group=1的情况
+@pytest.mark.parametrize("_kernel_size,_stride,_num_output,_pad,_group",Deconvolution_params)
+def test_Deconvolution(_kernel_size,_stride,_num_output,_pad,_group):
+    data_shape = [5, 4, 6, 6]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Deconvolution(n.data,
+            convolution_param=dict(kernel_size=_kernel_size,stride=_stride,num_output=_num_output,pad=_pad,group = _group,
+            weight_filler=dict(type="xavier",std = 0),bias_filler=dict(type='constant',value=0.03)),
+            param = [dict(lr_mult = 1, decay_mult = 1), dict(lr_mult = 2, decay_mult = 0)])
+        return n.to_proto()
+
+    op_type = "Deconvolution"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
 pool_params = {
     (2,2,0,P.Pooling.MAX),
     (2,4,1,P.Pooling.MAX),
@@ -258,6 +294,7 @@ def test_pool(_kernel_size,_stride,_pad,_pool):
     net_path, model_path = saveModel(op_type,str(net()))    
     verify_caffe_forward_impl(net_path, model_path, data_shape)
 
+
 innerproduct_params = {
     (5, 0.03, 0.2),
     (3, 0.01, 0)
@@ -277,14 +314,15 @@ def test_InnerProduct(_num_output,_std,_vaule):
     net_path, model_path = saveModel(op_type,str(net()))    
     verify_caffe_forward_impl(net_path, model_path, data_shape)
 
+
 def test_mnist():
-    data_shape = [10, 3, 224, 224]
+    data_shape = [10, 3, 160, 160]
     import caffe
     
     def net():
         n = caffe.NetSpec()
         n.data=L.Input(input_param=dict(shape=dict(dim = data_shape)))
-        n.ip1 = L.InnerProduct(n.data, num_output=500, weight_filler=dict(type='xavier'))
+        n.ip1 = L.InnerProduct(n.data, num_output=50, weight_filler=dict(type='xavier'))
         n.relu1 = L.ReLU(n.ip1, in_place=True)
         n.dataout = L.InnerProduct(n.relu1, num_output=10, weight_filler=dict(type='xavier'))
         return n.to_proto()
@@ -310,6 +348,24 @@ def test_relu():
     net_path, model_path = saveModel(op_type,str(net()))    
     verify_caffe_forward_impl(net_path, model_path, data_shape)
 
+
+def test_PReLU():
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Convolution(n.data,param = [dict(lr_mult = 1, decay_mult = 1), dict(lr_mult = 2, decay_mult = 0)],kernel_size=7,stride=2,num_output=64,weight_filler=dict(type="xavier",std = 0.03))
+        n.prelu = L.PReLU(n.dataout, in_place=True)
+        return n.to_proto()
+
+    op_type = "PReLU"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+@pytest.mark.skip(reason="跳过")
 def test_BatchNorm():
     data_shape = [10, 3, 224, 224]
     import caffe
@@ -319,7 +375,7 @@ def test_BatchNorm():
         n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
         n.dataout = L.Convolution(n.data,param = [dict(lr_mult = 1, decay_mult = 1), dict(lr_mult = 2, decay_mult = 0)],kernel_size=7,stride=2,num_output=64,pad=3,weight_filler=dict(type="xavier",std = 0.03),
                           bias_filler=dict(type='constant',value=0.2))
-        n.bn= L.BatchNorm(n.dataout, batch_norm_param=dict(moving_average_fraction=0.90),in_place=True)  # top=conv1
+        n.bn= L.BatchNorm(n.dataout, moving_average_fraction=0.90,eps=0.001,in_place=True) 
         # n.relu = L.ReLU(n.dataout)
         return n.to_proto()
 
@@ -327,6 +383,8 @@ def test_BatchNorm():
     net_path, model_path = saveModel(op_type,str(net()))    
     verify_caffe_forward_impl(net_path, model_path, data_shape)
 
+
+@pytest.mark.skip(reason="跳过")
 def test_Scale():
     data_shape = [10, 3, 224, 224]
     import caffe
@@ -340,6 +398,388 @@ def test_Scale():
         return n.to_proto()
 
     op_type = "Scale"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+def test_Sigmoid():
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Convolution(n.data,param = [dict(lr_mult = 1, decay_mult = 1), dict(lr_mult = 2, decay_mult = 0)],kernel_size=7,stride=2,num_output=64,pad=3,weight_filler=dict(type="xavier",std = 0.03),
+                          bias_filler=dict(type='constant',value=0.2))
+        n.sig1 = L.Sigmoid(n.dataout, in_place=True) 
+        return n.to_proto()
+
+    op_type = "Sigmoid"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+forELU_params = {
+    (2),
+    (1),
+    (3),
+    (4),
+}
+@pytest.mark.parametrize("_alpha",forELU_params)
+def test_ELU(_alpha):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.ELU(n.data, alpha = _alpha) 
+        return n.to_proto()
+
+    op_type = "ELU"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+Softmax_params = {
+    (2),
+    (1)
+}
+@pytest.mark.parametrize("_axis",Softmax_params)
+def test_Softmax(_axis):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Softmax(n.data,axis = _axis) 
+        return n.to_proto()
+
+    op_type = "Softmax"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+Concat_params = {
+    (0),
+    (1)
+}
+@pytest.mark.parametrize("_axis",Concat_params)
+def test_Concat(_axis):
+    data_shape = [10, 1, 28, 28]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data1 = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.data2 = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout=L.Concat(n.data1,n.data2,concat_param=dict(axis=_axis))
+        return n.to_proto()
+
+    op_type = "Concat"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl_twoinput(net_path, model_path, data_shape)
+
+
+forLRN_params = {
+    (5, 0.0001, 0.75),
+    (3, 5e-05, 0.75)
+}
+@pytest.mark.parametrize("_local_size,_alpha,_beta",forLRN_params)
+def test_LRN(_local_size,_alpha,_beta):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.LRN(n.data, local_size=_local_size, alpha=_alpha, beta=_beta) 
+        return n.to_proto()
+
+    op_type = "LRN"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+dropout_params = {
+    (0.5),
+    (0.3)
+}
+@pytest.mark.parametrize("ratio",dropout_params)
+def test_dropout(ratio):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Convolution(n.data,param = [dict(lr_mult = 1, decay_mult = 1), dict(lr_mult = 2, decay_mult = 0)],kernel_size=7,stride=2,num_output=64,pad=3,weight_filler=dict(type="xavier",std = 0.03),
+                          bias_filler=dict(type='constant',value=0.2))
+        n.drop=L.Dropout(n.dataout,dropout_ratio=ratio,in_place=True)
+        return n.to_proto()
+
+    op_type = "dropout"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+def test_TanH():
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.TanH(n.data)
+        return n.to_proto()
+
+    op_type = "TanH"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+forExp_params = {
+    (-1,2,3),
+    (3,2,2),
+    (2,1,4),
+}
+@pytest.mark.parametrize("_base,_scale,_shift",forExp_params)
+def test_Exp(_base,_scale,_shift):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Exp(n.data, base = _base,scale=_scale,shift=_shift) 
+        return n.to_proto()
+
+    op_type = "Exp"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+Power_params = {
+    (-1,2,3),
+    (3,2,2),
+    (0,1,4),
+}
+@pytest.mark.parametrize("_power,_scale,_shift",Power_params)
+def test_Power(_power,_scale,_shift):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Power(n.data, power = _power,scale=_scale,shift=_shift) 
+        return n.to_proto()
+
+    op_type = "Power"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+Log_params = {
+    (-1,2,3),
+    (3,2,2),
+    (2,1,4),
+}
+@pytest.mark.parametrize("_base,_scale,_shift",Log_params)
+def test_Log(_base,_scale,_shift):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Log(n.data, base = _base,scale=_scale,shift=_shift) 
+        return n.to_proto()
+
+    op_type = "Log"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+def test_BNLL():
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.BNLL(n.data) 
+        return n.to_proto()
+
+    op_type = "BNLL"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+def test_AbsVal():
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.AbsVal(n.data) 
+        return n.to_proto()
+
+    op_type = "AbsVal"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+ArgMax_params = {
+    (0,2,3),
+    (0,1,2),
+    (1,1,3),
+    (1,2,2)
+}
+@pytest.mark.parametrize("_out_max_val,_top_k,_axis",ArgMax_params)
+def test_ArgMax(_out_max_val,_top_k,_axis):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.ArgMax(n.data, out_max_val = _out_max_val,top_k=_top_k,axis=_axis) 
+        return n.to_proto()
+
+    op_type = "ArgMax"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+# Crop_params = {
+#     (2,0),
+#     (1,1)
+# }
+# @pytest.mark.parametrize("_axis,_offset",Crop_params)
+@pytest.mark.skip(reason="跳过")
+def test_Crop(_axis,_offset):
+    data_shape = [10, 1, 28, 28]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data1 = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.data2 = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout=L.Crop(n.data1,n.data2,axis = _axis,offset = _offset)
+        return n.to_proto()
+
+    op_type = "Crop"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl_twoinput(net_path, model_path, data_shape)
+
+
+Flatten_params = {
+    (1,3),
+    (2,-1)
+}
+@pytest.mark.parametrize("_axis,_end_axis",Flatten_params)
+def test_Flatten(_axis,_end_axis):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout=L.Flatten(n.data,axis=_axis ,end_axis = _end_axis)
+        return n.to_proto()
+
+    op_type = "Flatten"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+Embed_params = {
+    (2, 3),
+}
+@pytest.mark.parametrize("_input_dim,_num_output",Embed_params)
+def test_Embed(_input_dim,_num_output):
+    data_shape = [10, 4, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Embed(n.data,param = [dict(lr_mult = 1)],input_dim = _input_dim,num_output = _num_output,
+                    weight_filler=dict(type="xavier",std = 0),bias_filler=dict(type='constant',value=0.03))
+        return n.to_proto()
+
+    op_type = "Embed"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+Reduction_params = {
+    (1),
+    (2),
+    (3),
+    (4)
+}
+@pytest.mark.parametrize("_operation",Reduction_params)
+def test_Reduction(_operation):
+    data_shape = [10, 3, 224, 224]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Reduction(n.data,axis=0, coeff = 1, operation=_operation)
+        return n.to_proto()
+
+    op_type = "Reduction"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    verify_caffe_forward_impl(net_path, model_path, data_shape)
+
+
+def test_Slice():
+    data_shape = [25,3,24,24]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        # slice point 拆分点
+        n.dout1, n.dout2, n.dout3 = L.Slice(n.data, slice_param={'axis':0},ntop=3,slice_point=[10, 15])
+        # n.lr, n.lg, n.lb = L.Slice(n.data, slice_param={'slice_dim':0},ntop=3,slice_point=[10, 15])
+        return n.to_proto()
+
+    op_type = "Slice"
+    net_path, model_path = saveModel(op_type,str(net()))    
+    # verify_caffe_forward_impl(net_path, model_path, data_shape)
+    dtype = 'float32'
+    data = np.random.uniform(size=data_shape).astype(dtype)  # 生成测试数据
+    net = caffe.Net(net_path,model_path,caffe.TEST)
+    net.blobs['data'].data[...]= data
+    net.forward()
+    c_out =[]
+    c_out.append(net.blobs['dout1'].data)
+    c_out.append(net.blobs['dout2'].data)
+    c_out.append(net.blobs['dout3'].data)
+    for target, ctx in ctx_list():
+        tvm_out = get_tvm_output(net_path, model_path, data, target, ctx)       
+        # import ipdb; ipdb.set_trace()
+        tvm.testing.assert_allclose(c_out, tvm_out, rtol=1e-5, atol=1e-5)
+    
+
+
+def test_Tile():
+    data_shape = [2, 3, 4, 5]
+    import caffe
+
+    def net():
+        n = caffe.NetSpec()
+        n.data = L.Input(input_param=dict(shape=dict(dim = data_shape)))
+        n.dataout = L.Tile(n.data,axis=3, tiles=3) 
+        return n.to_proto()
+
+    op_type = "Tile"
     net_path, model_path = saveModel(op_type,str(net()))    
     verify_caffe_forward_impl(net_path, model_path, data_shape)
 
@@ -365,11 +805,35 @@ def saveModel(name,netproto):
 
     return net_path, model_path
 
+
 if __name__ == '__main__':
     # test_eltwise(0)
     # test_eltwise_sub()
-    # test_conv(7,2,64,3,1)
+    # test_conv(5,1,256,2,2)
+    # test_Deconvolution(4,2,60,0,2)
     # test_pool(2,2,0,P.Pooling.AVE)
     # test_InnerProduct(5, 0.03, 0.2)
-    test_mnist()
+    # test_mnist()
+    # test_Concat(0)
     # test_relu()
+    # test_BatchNorm()
+    # test_Scale()
+    # test_Sigmoid()
+    # test_Softmax(2)
+    # test_LRN(3, 5e-05, 0.75)
+    # test_dropout(0.5)
+    # test_PReLU()
+    # test_TanH()
+    # test_ELU(2)
+    # test_Exp(2,2,3)
+    # test_Power(3,2,3)
+    # test_Log(2,2,3)
+    # test_BNLL()
+    # test_AbsVal()
+    # test_ArgMax(1,2,3)
+    # test_Crop(2,0)
+    # test_Flatten(2,3)
+    # test_Embed(2,3)
+    # test_Reduction(1)
+    test_Slice()
+    # test_Tile()

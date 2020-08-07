@@ -17,6 +17,13 @@ import copy
 
 __all__ = ['from_caffe']
 
+def _as_list(arr):
+    """Force being a list, ignore if already is."""
+    if isinstance(arr, list):
+        return arr
+    return [arr]
+
+
 def dimension_picker(prefix, surfix=''):
     """Check that dimensions are supported."""
     def _impl(attr):
@@ -27,6 +34,7 @@ def dimension_picker(prefix, surfix=''):
             'Non-2D kernels are not supported for operator {}2d'.format(prefix))
 
     return _impl
+
 
 def dimension_constraint():
     def _dim_check(args):
@@ -76,6 +84,7 @@ class Eltwise(CaffeOpConverter):
             #按元素求最大值
             cls.name = 'maximum'
         return get_relay_op(cls.name)(*inputs)
+
 
 class Convolution(CaffeOpConverter):
     """ Operator converter for Conv.
@@ -133,6 +142,7 @@ class Convolution(CaffeOpConverter):
             out = _op.nn.bias_add(out, relay.Constant(tvm.nd.array(params[layer.name][1])))
         return out
 
+
 class Pooling(CaffeOpConverter):
     """ Operator converter for Pooling.
     """
@@ -183,6 +193,7 @@ class Pooling(CaffeOpConverter):
             custom_check=dimension_constraint())(inputs, args, params)
         return out
 
+
 class InnerProduct(CaffeOpConverter):
     """ Operator converter for InnerProduct.
     """
@@ -199,14 +210,13 @@ class InnerProduct(CaffeOpConverter):
             out = _op.nn.bias_add(out, relay.Constant(tvm.nd.array(params[layer.name][1])))
         return out
 
+
 class ReLU(CaffeOpConverter):
     """ Operator converter for ReLU.
     """
 
     @classmethod
     def _impl(cls, inputs, layer, params):
-        # 将权重加入到input
-        # import ipdb; ipdb.set_trace()
         # relu
         if layer.relu_param.negative_slope == 0:
             return _op.nn.relu(inputs[0])
@@ -215,8 +225,388 @@ class ReLU(CaffeOpConverter):
             return _op.nn.leaky_relu(inputs[0], alpha=float(layer.relu_param.negative_slope))
 
 
+class PReLU(CaffeOpConverter):
+    """ Operator converter for PReLU.
+    """
 
-# compatible operators that do NOT require any conversion.
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # import ipdb; ipdb.set_trace()
+        # 将权重加入到input
+        inputs.append(relay.Constant(tvm.nd.array(params[layer.name][0])))
+        assert len(inputs) == 2, "Prelu need 2 inputs, {} given".format(len(inputs))
+        return _op.nn.prelu(inputs[0], inputs[1])
+
+
+class Concat(CaffeOpConverter):
+    """ Operator converter for Concat.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        return _op.concatenate(_as_list(inputs), axis = layer.concat_param.axis)
+
+
+class BatchNorm(CaffeOpConverter):
+    """ Operator converter for BatchNorm.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # import ipdb; ipdb.set_trace()
+        inputs.append(relay.Constant(tvm.nd.array(params[layer.name][0])))
+        inputs.append(relay.Constant(tvm.nd.array(params[layer.name][1])))
+        inputs.append(relay.Constant(tvm.nd.array(params[layer.name][2])))
+        args = {
+                "epsilon": layer.batch_norm_param.eps,  # 滑动系数
+                "momentum": layer.batch_norm_param.moving_average_fraction
+                }
+        return AttrCvt(
+            op_name='batch_norm',
+            disables=['momentum'],
+            ignores=[
+                'order', 'spatial', 'is_test', 'consumed_inputs', 'num_batches'
+            ])(inputs, args, params)
+
+
+class Deconvolution(CaffeOpConverter):
+    """ Operator converter for Deconvolution.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # 提取超参数
+        ##膨胀系数dilations
+        dilations = [1, 1]
+        if layer.convolution_param.dilation != []:
+            dilation = layer.convolution_param.dilation[0]
+            dilations = [dilation, dilation]
+        ##填充pads
+        pads = [0, 0]  # 默认为0
+        if layer.convolution_param.pad != []:  # 若存在pad,则根据pad赋值
+            pads = np.array([layer.convolution_param.pad] * 2).reshape(1, -1)[0].tolist()
+        elif layer.convolution_param.pad_h != 0 or layer.convolution_param.pad_w != 0:  # 若存在pad_w,pad_h则根据其赋值
+            pads = [layer.convolution_param.pad_h, layer.convolution_param.pad_w]
+        ##步长strides
+        strides = [1, 1]  # 默认为1
+        if layer.convolution_param.stride != []:
+            strides = np.array([layer.convolution_param.stride] * 2).reshape(1, -1)[0].tolist()
+        ##卷积核尺寸kernel_shape
+        kernel_shape = np.array([layer.convolution_param.kernel_size] * 2).reshape(1, -1)[0].tolist()
+        if layer.convolution_param.kernel_size == []:
+            kernel_shape = [layer.convolution_param.kernel_h, layer.convolution_param.kernel_w]
+        ##分组group
+        # 只支持group=1的情况
+        group = layer.convolution_param.group
+
+        # 将权重加入到input
+        inputs.append(relay.Constant(tvm.nd.array(params[layer.name][0])))
+
+        args = {
+              'kernel_shape': kernel_shape,
+              'strides': strides,
+              'dilation': dilations,
+              'padding': pads,
+              'groups': group,
+              'data_layout': 'NCHW',
+            #   'kernel_layout': 'OIHW'
+              }
+
+        out = AttrCvt(
+            op_name=dimension_picker('conv', '_transpose'),
+            transforms={
+                'kernel_shape': 'kernel_size',
+                # 'dilations': ('dilation', 1),
+                # 'pads': ('padding', 0),
+                # 'strides': 'strides',
+                'group': ('groups', 1),
+            },
+            custom_check=dimension_constraint())(inputs[:2], args, params)
+
+        if layer.convolution_param.bias_term:
+            out = _op.nn.bias_add(out, relay.Constant(tvm.nd.array(params[layer.name][1])))
+        return out
+
+
+class Scale(CaffeOpConverter):
+    """ Operator converter for Scale.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        import ipdb; ipdb.set_trace()
+        inputs.append(relay.Constant(tvm.nd.array(params[layer.name][0])))
+        inputs.append(relay.Constant(tvm.nd.array(params[layer.name][1])))
+        scale = float(attr.get('scale', 1.0))
+        return inputs[0] * _expr.const(scale)
+
+
+class Softmax(CaffeOpConverter):
+    """ Operator converter for Softmax.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        args={'axis':layer.softmax_param.axis}
+        return AttrCvt('softmax', transforms={'axis': ('axis', args['axis'])})(inputs, args, params)
+
+
+class LRN(CaffeOpConverter):
+    """ Operator converter for LRN.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        args = {
+              'size': layer.lrn_param.local_size,
+              'axis': 1,
+              'bias': 1.0,
+              'alpha': layer.lrn_param.alpha,
+              'beta': layer.lrn_param.beta,
+              }
+        return AttrCvt('lrn')(inputs, args)
+
+
+class Dropout(CaffeOpConverter):
+    """ Operator converter for Dropout.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        args={'rate':layer.dropout_param.dropout_ratio}
+        return AttrCvt('dropout')(inputs, args)
+
+
+class TanH(CaffeOpConverter):
+    """ Operator converter for TanH.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        args={}
+        return AttrCvt('tanh')(inputs, args)
+
+
+class Sigmoid(CaffeOpConverter):
+    """ Operator converter for Sigmoid.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        args={}
+        return AttrCvt('sigmoid')(inputs, args)
+
+
+class ELU(CaffeOpConverter):
+    """ Operator converter for ELU.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        alpha = layer.elu_param.alpha
+        return _expr.const(-alpha) * _op.nn.relu(_expr.const(1.) - _op.exp(inputs[0])) + \
+                                     _op.nn.relu(inputs[0])
+
+
+class Exp(CaffeOpConverter):
+    """ Operator converter for Exp.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # import ipdb; ipdb.set_trace()
+        base = layer.exp_param.base
+        scale = layer.exp_param.scale
+        shift = layer.exp_param.shift
+        if base == -1:
+            # y = exp(shift + scale * x)
+            return _op.exp(_expr.const(shift) + _expr.const(scale) * inputs[0])
+        else:
+            # y = base ^ (shift + scale * x)
+            return _op.power( _expr.const(base) , (_expr.const(shift) + _expr.const(scale) * inputs[0]))
+
+
+class Power(CaffeOpConverter):
+    """ Operator converter for Power.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        power = layer.power_param.power
+        scale = layer.power_param.scale
+        shift = layer.power_param.shift
+        # y = (shift + scale * x) ^ power
+        return _op.power( _expr.const(shift) + (_expr.const(scale) * inputs[0]), _expr.const(power) )
+
+
+class Log(CaffeOpConverter):
+    """ Operator converter for Log.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # import ipdb; ipdb.set_trace()
+        base = layer.log_param.base
+        scale = layer.log_param.scale
+        shift = layer.log_param.shift
+        if base == -1:
+            # y = ln(shift + scale * x) = log_e(shift + scale * x)
+            return _op.log(_expr.const(shift) + _expr.const(scale) * inputs[0])
+        else:
+            # y = log_base(shift + scale * x)
+            return _op.log( _expr.const(shift) + _expr.const(scale) * inputs[0])/_op.log(_expr.const(base))
+
+
+class BNLL(CaffeOpConverter):
+    """ Operator converter for BNLL.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # y = log(1 + exp(x))
+        return _op.log(  _expr.const(1.0) + _op.exp(inputs[0]))
+
+
+class AbsVal(CaffeOpConverter):
+    """ Operator converter for AbsVal.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # y = log(1 + exp(x))
+        args={}
+        return AttrCvt('abs')(inputs, args)
+
+
+class ArgMax(CaffeOpConverter):
+    """ Operator converter for ArgMax.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        args = {
+                "k": layer.argmax_param.top_k,
+                "axis": layer.argmax_param.axis
+                }
+        if layer.argmax_param.out_max_val :
+            # If true produce pairs (argmax, maxval),如果为真，产生 (argmax, maxval)数据对
+            return AttrCvt(op_name='topk')(inputs, args, params)                            
+        else:
+            return AttrCvt(op_name='topk',extras={"ret_type": "indices"})(inputs, args, params)    
+
+
+class Crop(CaffeOpConverter):
+    """ Operator converter for Crop.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        import ipdb; ipdb.set_trace()
+
+        reshaped_permuted_shape = _infer_shape(reshaped_permuted)
+        cropped = reshaped_permuted
+        for axis in range(1, M+1):
+            crop = crops[axis - 1]
+            if crop != [0, 0]:
+                indices = tvm.relay.arange(
+                    _expr.const(crop[0]),
+                    _expr.const(reshaped_permuted_shape[axis] - crop[1]),
+                    dtype='int32'
+                )
+                cropped = tvm.relay.take(cropped, indices=indices, axis=axis)
+
+        return cropped
+
+
+class flatten(CaffeOpConverter):
+    """ Operator converter for flatten.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # import ipdb; ipdb.set_trace()
+        axis = layer.flatten_param.axis
+        if axis == 1:
+            out = _op.nn.batch_flatten(inputs[0])
+        else:
+            newshape = [0] * (axis + 1)
+            newshape[axis] = -1
+            out = _op.reshape(inputs[0], list(newshape))
+        return out
+
+
+class Embed(CaffeOpConverter):
+    """ Operator converter for Embed.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        import ipdb; ipdb.set_trace()
+        # 将权重加入到input
+        inputs.append(relay.Constant(tvm.nd.array(params[layer.name][0])))
+        if layer.embed_param.bias_term:
+            out = _op.nn.bias_add(out, relay.Constant(tvm.nd.array(params[layer.name][1])))
+        
+
+        return _op.take(weight, indices.astype('int32'), axis=0)
+
+
+class Reduction(CaffeOpConverter):
+    """ Operator converter for Reduction.
+        SUM = 1;ASUM = 2;SUMSQ = 3;MEAN = 4;
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        axis = layer.reduction_param.axis
+        # import ipdb; ipdb.set_trace()        
+        if layer.reduction_param.operation == 1:
+            # SUM = 1;
+            return _op.sum(inputs[0], axis=axis, keepdims='False', exclude='False')
+
+        elif layer.reduction_param.operation == 2:
+            # ASUM = 2;
+            pass
+        elif layer.reduction_param.operation == 3:
+            # SUMSQ = 3;
+            pass
+        else:
+            # MEAN = 4;
+            return _op.mean(inputs[0], axis=axis, keepdims='False', exclude='False')
+
+
+class Tile(CaffeOpConverter):
+    """ Operator converter for Tile.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        # import ipdb; ipdb.set_trace()
+        repeats = layer.tile_param.tiles
+        axis = layer.tile_param.axis
+        return _op.repeat(inputs[0], repeats, axis)
+
+
+class Slice(CaffeOpConverter):
+    """ Operator converter for Slice.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, layer, params):
+        
+        new_attrs = {}
+        # begin = list(layer.slice_param.slice_point)
+        # begin.insert(0,0)
+        # import ipdb; ipdb.set_trace()
+        input_shape = inputs[0].type_annotation.shape
+        stride = layer.slice_param.slice_point
+        axis = layer.slice_param.axis
+        new_attrs = {'begin': [0], 'end': [input_shape[axis]]}
+        if stride is not None:
+            new_attrs['strides'] = stride
+        return _op.strided_slice(inputs[0], **new_attrs)
+
+
 _identity_list = []
 
 
@@ -228,6 +618,30 @@ def _get_convert_map():
         'Pooling': Pooling.get_converter(),
         'InnerProduct':InnerProduct.get_converter(),
         'ReLU': ReLU.get_converter(),
+        'PReLU': PReLU.get_converter(),
+        'Concat': Concat.get_converter(),
+        'BatchNorm': BatchNorm.get_converter(),
+        'Scale': Scale.get_converter(),
+        'Softmax': Softmax.get_converter(),
+        'LRN': LRN.get_converter(),
+        'Dropout': Dropout.get_converter(),
+        'Deconvolution': Deconvolution.get_converter(),
+        'TanH': TanH.get_converter(),
+        'Sigmoid': Sigmoid.get_converter(),
+        'ELU': ELU.get_converter(),
+        'Exp': Exp.get_converter(),
+        'Power': Power.get_converter(),
+        'Log': Log.get_converter(),
+        'BNLL': BNLL.get_converter(),
+        'AbsVal': AbsVal.get_converter(),
+        'ArgMax': ArgMax.get_converter(),
+        'Crop': Crop.get_converter(),
+        'Flatten': flatten.get_converter(),
+        'Embed': Embed.get_converter(),
+        'Reduction': Reduction.get_converter(),
+        'Tile': Tile.get_converter(),
+        'Slice': Slice.get_converter(),
+
     }
 
 
@@ -320,7 +734,8 @@ class CaffeNetDef(object):
                     # paramdata = np.array(Params[i].data,dtype='float32').reshape((ParamShape[i]))
                     ParamData.append(paramdata)
                 # if layer.type == "BatchNorm" or layer.type == "BN": 
-                #     if len(ParmShape) == 3:  
+                #     # import ipdb; ipdb.set_trace()
+                #     if len(ParamShape) == 3:  
                 #         # 如果是bn层，则不用最后一层的滑动系数
                 #         ParamShape = ParamShape[:-1]
                 #         ParamData = ParamData[:-1]
@@ -344,7 +759,7 @@ class CaffeNetDef(object):
         '''根据layer.bottom找到输入
         从self._nodes找到输入
         从_get_convert_map找到转化函数
-        调用转化函数得到转化好的tvm_op，并保存到_convert_relay_map中
+        调用转化函数得到转化好的tvm_op，并保存到self._nodes中
         '''
 
         inputs = []
@@ -424,7 +839,7 @@ class CaffeNetDef(object):
         print("5.处理输出")
         if outputs is None:
             # 寻找默认输出
-            # import ipdb; ipdb.set_trace()
+            import ipdb; ipdb.set_trace()
             # for i in range(len(self._LayerList)):
             #     if self.judgeoutput(self._LayerList[i],self._LayerList):
             #         layer = self._LayerList[i]
@@ -446,6 +861,7 @@ class CaffeNetDef(object):
         print("添加out",type(out))
         out = out[0] if len(out) == 1 else _expr.Tuple(out)
         func = _function.Function(analysis.free_vars(out), out)
+        # import ipdb; ipdb.set_trace()
         self._mod["main"] = func
         return self._mod, None
         # return self._mod, self._params
